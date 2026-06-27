@@ -1,0 +1,11 @@
+name = "openmontage-ai"
+main = "src/worker.js"
+compatibility_date = "2025-06-01"
+
+# Workers AI binding — gives the Worker env.AI.run(model, inputs)
+[ai]
+binding = "AI"
+
+# Optional: protect the proxy. Set with:
+#   npx wrangler secret put PROXY_SECRET
+# Then set CLOUDFLARE_AI_PROXY_SECRET to the same value in OpenMontage .env.
