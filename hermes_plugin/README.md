@@ -7,9 +7,17 @@ It provides these tools:
 - `openmontage_provider_inventory` — returns the provider/model routing catalog.
 - `openmontage_provider_status` — reports credential presence by environment-variable name only.
 - `openmontage_model_route` — recommends available models by media department, quality, and lane.
+- `openmontage_tool_catalog` — exposes the complete OpenMontage registry (86 tools, 18 capabilities) with declared input schemas without importing optional ML dependencies.
+- `openmontage_execute_tool` — executes any existing OpenMontage `BaseTool` by catalog name.
+- `openmontage_preflight_edit` — checks engine, FFmpeg/FFprobe, paths, and skill-pack readiness.
 - `openmontage_generate_image` — calls Cloudflare `/ai/run`, writes the image, hashes it, and records R2 metadata.
 - `openmontage_generate_voice` — delegates to OpenMontage's ElevenLabs tool, writes narration, hashes it, and records R2 metadata.
 - `openmontage_generate_video` — delegates ranking/generation to OpenMontage's existing VideoSelector and provider fallbacks.
+
+The generic registry bridge covers real editing capabilities including source ingest,
+clip retrieval, analysis, transcription, captions, audio processing, graphics,
+enhancement, character animation, video generation, video composition, transitions,
+reframing, stitching, trimming, rendering, and visual QA.
 
 ## Install into another Hermes profile
 
@@ -17,14 +25,16 @@ From the OpenMontage checkout:
 
 ```bash
 python scripts/install_hermes_plugin.py \\
-  --hermes-home /opt/data/profiles/Atlas-Content/.hermes
-hermes plugins enable openmontage
+  --hermes-home /opt/data/profiles/atlas-content
+hermes --profile atlas-content plugins enable openmontage
 ```
 
-For atlas-content, run the installer in the atlas-content/OpenMontage checkout
-or copy this repository to the profile workspace first. The installer copies
-only `hermes_plugin/`; it does not copy `.env`, credentials, generated media,
-or R2 files. Restart the atlas-content Hermes process after enabling the plugin.
+The installer copies the Hermes plugin into `<hermes-home>/plugins/openmontage`,
+the complete OpenMontage skill pack (78 skills) into
+`<hermes-home>/skills/openmontage`, and writes an engine-root marker so the
+registry bridge can find the checkout. It does not copy `.env`, credentials,
+generated media, or R2 files. Restart the target Hermes process after enabling
+the plugin.
 
 ## Transport boundary
 
