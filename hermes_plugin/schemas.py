@@ -100,6 +100,35 @@ PREFLIGHT = {
     },
 }
 
+PIPELINE_CATALOG = {
+    "name": "openmontage_pipeline_catalog",
+    "description": "List OpenMontage's instruction-driven pipeline manifests.",
+    "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+}
+
+PIPELINE_MANIFEST = {
+    "name": "openmontage_pipeline_manifest",
+    "description": "Load a validated OpenMontage pipeline manifest with stage order, director skills, required tools, review focus, and approval extensions.",
+    "parameters": {
+        "type": "object",
+        "properties": {"pipeline": {"type": "string"}, "include_full_manifest": {"type": "boolean", "default": True}},
+        "required": ["pipeline"],
+        "additionalProperties": False,
+    },
+}
+
+ARTIFACT_SCHEMA = {
+    "name": "openmontage_artifact_schema",
+    "description": "Return a canonical OpenMontage artifact JSON schema.",
+    "parameters": {"type": "object", "properties": {"artifact": {"type": "string"}}, "required": ["artifact"], "additionalProperties": False},
+}
+
+CHECKPOINT_VALIDATE = {
+    "name": "openmontage_validate_checkpoint",
+    "description": "Validate an OpenMontage checkpoint and its canonical artifact payloads against the project schemas.",
+    "parameters": {"type": "object", "properties": {"checkpoint": {"type": "object"}}, "required": ["checkpoint"], "additionalProperties": False},
+}
+
 MODEL_ROUTE = {
     "name": "openmontage_model_route",
     "description": "Recommend a provider and model for a media department using the OpenMontage routing catalog.",

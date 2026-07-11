@@ -211,9 +211,64 @@ def preflight_edit(operation: str = "doctor", project_path: str | None = None, i
         "ffmpeg_on_path": __import__("shutil").which("ffmpeg") is not None,
         "ffprobe_on_path": __import__("shutil").which("ffprobe") is not None,
         "skill_source_present": (root / ".agents" / "skills").is_dir(),
+        "pipeline_skill_source_present": (root / "skills").is_dir(),
+        "pipeline_manifest_source_present": (root / "pipeline_defs").is_dir(),
+        "artifact_schema_source_present": (root / "schemas" / "artifacts").is_dir(),
     }
     checks["ready"] = checks["engine_present"] and checks["ffmpeg_on_path"]
     return json.dumps({"success": True, "preflight": checks})
+
+
+def pipeline_catalog(**_: Any) -> str:
+    """List available instruction-driven OpenMontage pipeline manifests."""
+    root = _engine_root()
+    names = sorted(p.stem for p in (root / "pipeline_defs").glob("*.yaml")) if (root / "pipeline_defs").is_dir() else []
+    return json.dumps({"success": True, "engine_root": str(root), "count": len(names), "pipelines": names})
+
+
+def pipeline_manifest(pipeline: str, include_full_manifest: bool = True, **_: Any) -> str:
+    """Load a validated pipeline manifest and expose its stage director contract."""
+    _load_runtime_env()
+    _ensure_engine_importable()
+    try:
+        from lib.pipeline_loader import get_required_tools, get_stage_order, get_stage_review_focus, get_stage_skill, load_pipeline
+        manifest = load_pipeline(pipeline)
+        result: dict[str, Any] = {
+            "success": True,
+            "pipeline": pipeline,
+            "stage_order": get_stage_order(manifest),
+            "required_tools": sorted(get_required_tools(manifest)),
+            "stages": [
+                {"name": stage["name"], "skill": get_stage_skill(manifest, stage["name"]), "review_focus": get_stage_review_focus(manifest, stage["name"])}
+                for stage in manifest.get("stages", [])
+            ],
+            "extensions": manifest.get("extensions", {}),
+        }
+        if include_full_manifest:
+            result["manifest"] = manifest
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as exc:
+        return json.dumps({"success": False, "pipeline": pipeline, "error": str(exc)})
+
+
+def artifact_schema(artifact: str, **_: Any) -> str:
+    """Return a canonical artifact JSON schema from OpenMontage."""
+    path = _engine_root() / "schemas" / "artifacts" / f"{artifact}.schema.json"
+    if not path.is_file():
+        return json.dumps({"success": False, "error": f"Unknown artifact schema: {artifact}"})
+    return json.dumps({"success": True, "artifact": artifact, "schema": json.loads(path.read_text(encoding="utf-8"))}, ensure_ascii=False)
+
+
+def validate_checkpoint_payload(checkpoint: dict[str, Any], **_: Any) -> str:
+    """Validate a canonical OpenMontage checkpoint and its artifacts."""
+    _load_runtime_env()
+    _ensure_engine_importable()
+    try:
+        from lib.checkpoint import validate_checkpoint
+        validate_checkpoint(checkpoint)
+        return json.dumps({"success": True, "valid": True, "stage": checkpoint.get("stage"), "pipeline_type": checkpoint.get("pipeline_type")})
+    except Exception as exc:
+        return json.dumps({"success": True, "valid": False, "error": str(exc)})
 
 
 def _load_runtime_env() -> None:

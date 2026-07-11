@@ -58,3 +58,27 @@ def register(ctx):
         schema=schemas.PREFLIGHT,
         handler=lambda args, **kwargs: tools.preflight_edit(**(args or {})),
     )
+    ctx.register_tool(
+        name="openmontage_pipeline_catalog",
+        toolset="openmontage",
+        schema=schemas.PIPELINE_CATALOG,
+        handler=lambda args, **kwargs: tools.pipeline_catalog(**(args or {})),
+    )
+    ctx.register_tool(
+        name="openmontage_pipeline_manifest",
+        toolset="openmontage",
+        schema=schemas.PIPELINE_MANIFEST,
+        handler=lambda args, **kwargs: tools.pipeline_manifest(**(args or {})),
+    )
+    ctx.register_tool(
+        name="openmontage_artifact_schema",
+        toolset="openmontage",
+        schema=schemas.ARTIFACT_SCHEMA,
+        handler=lambda args, **kwargs: tools.artifact_schema(**(args or {})),
+    )
+    ctx.register_tool(
+        name="openmontage_validate_checkpoint",
+        toolset="openmontage",
+        schema=schemas.CHECKPOINT_VALIDATE,
+        handler=lambda args, **kwargs: tools.validate_checkpoint_payload(**(args or {})),
+    )
