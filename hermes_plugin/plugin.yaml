@@ -1,0 +1,9 @@
+name: openmontage
+version: 0.1.0
+description: Hermes integration for OpenMontage provider routing, capability discovery, rendering, and verified delivery.
+author: Atlas-Os1
+provides_tools:
+  - openmontage_provider_inventory
+  - openmontage_provider_status
+  - openmontage_model_route
+provides_hooks: []

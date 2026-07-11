@@ -1,0 +1,138 @@
+# OpenMontage provider routing catalog.
+# Secret values stay in the owning Hermes/profile .env and are never committed here.
+# Cloudflare model names are split between Workers AI (@cf/) and AI Gateway partner models.
+
+providers:
+  cloudflare:
+    label: Cloudflare Workers AI + AI Gateway
+    credential_env_any:
+      - CLOUDFLARE_WORKERS_AI_TOKEN
+      - CLOUDFLARE_API_TOKEN
+    required_env:
+      - CLOUDFLARE_ACCOUNT_ID
+    storage_env_any:
+      - CLOUDFLARE_R2_ACCESS_KEY_ID
+      - CLOUDFLARE_WORKERS_R2_TOKEN
+    secret_env_any:
+      - CLOUDFLARE_R2_SECRET_ACCESS_KEY
+      - CLOUDFLARE_AI_PROXY_SECRET
+    departments:
+      image_generation:
+        preferred:
+          - 'google/nano-banana-2'
+          - 'google/nano-banana-pro'
+          - '@cf/black-forest-labs/flux-2-klein-9b'
+          - '@cf/black-forest-labs/flux-2-dev'
+          - 'black-forest-labs/flux-2-pro-preview'
+          - 'black-forest-labs/flux-2-flex'
+        draft:
+          - '@cf/black-forest-labs/flux-1-schnell'
+          - '@cf/black-forest-labs/flux-2-klein-4b'
+        notes: Partner models use AI Gateway /ai/run; @cf models use Workers AI. Verify current catalog before execution.
+      image_editing:
+        preferred:
+          - 'google/nano-banana-2'
+          - 'google/nano-banana-pro'
+          - 'pruna/p-image-edit'
+          - '@cf/black-forest-labs/flux-2-klein-9b'
+          - '@cf/runwayml/stable-diffusion-v1-5-img2img'
+      image_understanding:
+        preferred:
+          - '@cf/moondream/moondream3.1-9B-A2B'
+          - '@cf/llava-hf/llava-1.5-7b-hf'
+      image_upscale:
+        preferred:
+          - 'pruna/p-image-upscale'
+      image_try_on:
+        preferred:
+          - 'pruna/p-image-try-on'
+      video_generation:
+        preferred:
+          - 'bytedance/seedance-2.0'
+          - 'bytedance/seedance-2.0-fast'
+          - 'pruna/p-video'
+          - 'runwayml/aleph-2'
+        notes: These are AI Gateway partner routes and must be catalog-checked before use; Workers AI search returned no Text-to-Video models for this account.
+      voice:
+        preferred:
+          - '@cf/deepgram/aura-2-en'
+          - '@cf/myshell-ai/melotts'
+      transcription:
+        preferred:
+          - '@cf/deepgram/nova-3'
+          - '@cf/openai/whisper-large-v3-turbo'
+      text:
+        preferred:
+          - '@cf/openai/gpt-oss-120b'
+          - '@cf/moonshotai/kimi-k2.7-code'
+          - '@cf/deepseek-ai/deepseek-r1-distill-qwen-32b'
+      embeddings:
+        preferred:
+          - '@cf/baai/bge-m3'
+          - '@cf/qwen/qwen3-embedding-0.6b'
+
+  openai:
+    label: OpenAI direct API
+    credential_env_any:
+      - OPENAI_API_KEY
+    departments:
+      text:
+        preferred: []
+      image_generation:
+        preferred: []
+      voice:
+        preferred: []
+
+  nvidia:
+    label: NVIDIA API / NIM fallback
+    credential_env_any:
+      - NVIDIA_API_KEY
+      - NGC_API_KEY
+    departments:
+      text:
+        preferred: []
+      image_understanding:
+        preferred: []
+      embeddings:
+        preferred: []
+    notes: Use for backup models and small/cheap auxiliary tasks after live credential verification.
+
+  stock_media:
+    label: Stock image and video sources
+    credential_env_any:
+      - PEXELS_API_KEY
+      - PIXABAY_API_KEY
+      - UNSPLASH_ACCESS_KEY
+    departments:
+      stock_media:
+        preferred:
+          - pexels
+          - pixabay
+          - unsplash
+          - archive.org
+
+  elevenlabs:
+    label: ElevenLabs voice and audio
+    credential_env_any:
+      - ELEVENLABS_API_KEY
+    departments:
+      voice:
+        preferred:
+          - elevenlabs
+      sound_effects:
+        preferred:
+          - elevenlabs
+
+  openmontage:
+    label: OpenMontage local capabilities
+    departments:
+      rendering:
+        preferred:
+          - remotion
+          - hyperframes
+          - ffmpeg
+      video_editing:
+        preferred:
+          - ffmpeg
+          - remotion
+          - hyperframes
