@@ -17,9 +17,11 @@ Routing is driven by `edit_decisions.render_runtime` (locked at proposal):
 
 Authoring mode is orthogonal to runtime. Setting
 `edit_decisions.composition_mode = "atelier"` (or `renderer_family="bespoke"`)
-routes to a hand-authored, project-local Remotion composition that BYPASSES the
-cut-schema and the stock scene-type registry entirely — the "hand-stitched
-every time" path for hero/bespoke pieces. See `_render_via_atelier`.
+means the composition is hand-authored rather than assembled from stock scene
+components. Runtime still wins first: HyperFrames atelier routes through
+`hyperframes_compose`, FFmpeg stays FFmpeg-only, and only Remotion atelier uses
+`_render_via_atelier` for a project-local Remotion entry that bypasses the
+cut-schema and stock scene-type registry.
 
 Silent runtime swaps are forbidden by governance. If the chosen runtime is
 unavailable or fails, this tool surfaces a structured blocker and waits for
@@ -29,11 +31,14 @@ the agent to re-ask the user rather than substituting a different engine.
 from __future__ import annotations
 
 import json
+import hashlib
 import logging
+import shutil
 import subprocess
 import time
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import unquote, urlsplit
 
 from tools.base_tool import (
     BaseTool,
@@ -187,6 +192,15 @@ class VideoCompose(BaseTool):
             "codec": {"type": "string", "default": "libx264"},
             "crf": {"type": "integer", "default": 23},
             "preset": {"type": "string", "default": "medium"},
+            "remotion_timeout_ms": {
+                "type": "integer",
+                "description": (
+                    "Remotion render timeout in milliseconds, passed through as "
+                    "`--timeout` (governs headless-browser setup and delayRender). "
+                    "Raise this when the browser is slow to start (e.g. restricted "
+                    "networks). The subprocess timeout is widened to match."
+                ),
+            },
         },
     }
 
@@ -230,6 +244,12 @@ class VideoCompose(BaseTool):
             return False
         return True
 
+    def _ffmpeg_available(self) -> bool:
+        """Check if the ffmpeg binary is actually resolvable on PATH."""
+        import shutil as _shutil
+
+        return bool(_shutil.which("ffmpeg"))
+
     def _hyperframes_available(self) -> bool:
         """Check if HyperFrames rendering is available.
 
@@ -250,10 +270,11 @@ class VideoCompose(BaseTool):
         fallback between runtimes is forbidden.
         """
         info = super().get_info()
+        ffmpeg_ok = self._ffmpeg_available()
         remotion_ok = self._remotion_available()
         hyperframes_ok = self._hyperframes_available()
         info["render_engines"] = {
-            "ffmpeg": True,
+            "ffmpeg": ffmpeg_ok,
             "remotion": remotion_ok,
             "hyperframes": hyperframes_ok,
         }
@@ -369,6 +390,49 @@ class VideoCompose(BaseTool):
         except Exception:
             return False
 
+    def _mux_external_audio(self, video_path: Path, audio_path: str | Path) -> ToolResult:
+        """Atomically replace a rendered video's audio with the approved mix."""
+
+        audio = Path(audio_path).resolve()
+        if not audio.is_file():
+            return ToolResult(success=False, error=f"Mixed audio not found: {audio}")
+
+        temp_output = video_path.with_name(
+            f".{video_path.stem}.audio-mux-{time.time_ns()}{video_path.suffix}"
+        )
+        try:
+            self.run_command([
+                "ffmpeg", "-y",
+                "-i", str(video_path),
+                "-i", str(audio),
+                "-map", "0:v:0",
+                "-map", "1:a:0",
+                "-c:v", "copy",
+                "-c:a", "aac",
+                "-b:a", "192k",
+                "-af", "apad",
+                "-shortest",
+                "-movflags", "+faststart",
+                str(temp_output),
+            ])
+            if not temp_output.is_file():
+                return ToolResult(
+                    success=False,
+                    error=f"Audio mux completed but output file is missing: {temp_output}",
+                )
+            temp_output.replace(video_path)
+        except Exception as exc:
+            return ToolResult(success=False, error=f"Could not mux mixed audio: {exc}")
+        finally:
+            if temp_output.exists():
+                temp_output.unlink()
+
+        return ToolResult(
+            success=True,
+            data={"output": str(video_path), "has_mixed_audio": True},
+            artifacts=[str(video_path)],
+        )
+
     def _compose(self, inputs: dict[str, Any]) -> ToolResult:
         """FFmpeg composition: concat video cuts, add audio, burn subtitles.
 
@@ -389,8 +453,22 @@ class VideoCompose(BaseTool):
         preset = inputs.get("preset", "medium")
         profile_name = inputs.get("profile")
 
-        # Resolve target resolution from profile or default
+        # Resolve target resolution + fit mode. Priority: explicit `profile`
+        # arg > edit_decisions.metadata.compose_target > default (landscape HD).
+        # compose_target = {"width": W, "height": H, "fit": "pad"|"cover"} lets a
+        # caller request vertical (9:16) or any aspect without a named profile.
+        # fit="pad" letterboxes (no content loss, the historical default);
+        # fit="cover" scales-to-fill and centre-crops (better for vertical social).
         resolution = "1920x1080"
+        fit_mode = "pad"
+        compose_target = (edit_decisions.get("metadata") or {}).get("compose_target")
+        if isinstance(compose_target, dict):
+            try:
+                resolution = f"{int(compose_target['width'])}x{int(compose_target['height'])}"
+            except (KeyError, ValueError, TypeError):
+                pass
+            if compose_target.get("fit") in ("pad", "cover"):
+                fit_mode = compose_target["fit"]
         if profile_name:
             try:
                 from lib.media_profiles import get_profile
@@ -398,6 +476,10 @@ class VideoCompose(BaseTool):
                 resolution = f"{p.width}x{p.height}"
             except (ImportError, ValueError):
                 pass
+        try:
+            target_w, target_h = (int(v) for v in resolution.split("x"))
+        except ValueError:
+            target_w, target_h = 1920, 1080
 
         cuts = edit_decisions.get("cuts", [])
         if not cuts:
@@ -474,17 +556,22 @@ class VideoCompose(BaseTool):
                     # pix_fmt / sar across ALL segments — otherwise it throws
                     # "Non-monotonous DTS" or silently produces corrupt output.
                     #
-                    # Default target is 1920x1080 @ 30fps, yuv420p, sar=1. If the
-                    # source is smaller it letterboxes; if larger it downscales.
-                    # Callers can override via edit_decisions.metadata.compose_target
-                    # (future extension) but the defaults match the most common
-                    # delivery profile (YouTube landscape).
-                    vf_parts: list[str] = [
-                        "scale=1920:1080:force_original_aspect_ratio=decrease",
-                        "pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=black",
-                        "setsar=1",
-                        "fps=30",
-                    ]
+                    # Target is target_w x target_h @ 30fps, yuv420p, sar=1
+                    # (default 1920x1080; overridable via `profile` or
+                    # edit_decisions.metadata.compose_target — see above).
+                    # fit="pad" letterboxes to preserve all content; fit="cover"
+                    # scales-to-fill then centre-crops (no bars, for vertical social).
+                    if fit_mode == "cover":
+                        geom = [
+                            f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase",
+                            f"crop={target_w}:{target_h}",
+                        ]
+                    else:
+                        geom = [
+                            f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease",
+                            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black",
+                        ]
+                    vf_parts: list[str] = [*geom, "setsar=1", "fps=30"]
                     af_parts: list[str] = []
                     if speed != 1.0:
                         vf_parts.append(f"setpts={1.0/speed}*PTS")
@@ -673,6 +760,124 @@ class VideoCompose(BaseTool):
             )
         return comp
 
+    @staticmethod
+    def _cuts_to_cinematic_scenes(cuts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Adapt canonical sequential cuts to CinematicRenderer's scene contract."""
+
+        scenes: list[dict[str, Any]] = []
+        timeline_cursor = 0.0
+        hard_transitions = {"cut", "none"}
+        title_types = {"hero_title", "text_card", "title"}
+
+        for index, cut in enumerate(cuts):
+            try:
+                source_in = float(cut.get("in_seconds", 0))
+                source_out = float(cut.get("out_seconds", source_in))
+                speed = max(float(cut.get("speed", 1.0)), 0.1)
+            except (TypeError, ValueError):
+                continue
+            duration = max(0.0, (source_out - source_in) / speed)
+            if duration <= 0:
+                continue
+
+            scene_id = str(cut.get("id") or f"cut-{index + 1}")
+            source = str(cut.get("source") or "")
+            cut_type = str(cut.get("type") or "").lower()
+            common = {
+                "id": scene_id,
+                "startSeconds": timeline_cursor,
+                "durationSeconds": duration,
+            }
+
+            if cut_type in title_types or not source:
+                scene: dict[str, Any] = {
+                    **common,
+                    "kind": "title",
+                    "text": str(
+                        cut.get("text")
+                        or cut.get("title")
+                        or cut.get("reason")
+                        or scene_id
+                    ),
+                }
+                if source:
+                    scene["backgroundSrc"] = source
+                    scene["backgroundTrimBeforeSeconds"] = source_in
+                    scene["backgroundTrimAfterSeconds"] = source_out
+            else:
+                scene = {
+                    **common,
+                    "kind": "video",
+                    "src": source,
+                    "trimBeforeSeconds": source_in,
+                    "trimAfterSeconds": source_out,
+                    "playbackRate": speed,
+                }
+                if str(cut.get("transition_in") or "").lower() in hard_transitions:
+                    scene["fadeInFrames"] = 0
+                if str(cut.get("transition_out") or "").lower() in hard_transitions:
+                    scene["fadeOutFrames"] = 0
+
+            scenes.append(scene)
+            timeline_cursor += duration
+
+        return scenes
+
+    @staticmethod
+    def _stage_remotion_media(value: Any, public_dir: Path) -> int:
+        """Copy local media references into a Remotion public dir in-place.
+
+        OffthreadVideo's compositor rejects ``file://`` sources. Rewriting
+        staged files to relative ``staticFile()`` paths works for video and
+        image components on every platform.
+        """
+
+        staged_by_source: dict[Path, str] = {}
+        media_keys = {"source", "src", "backgroundSrc"}
+
+        def visit(node: Any, parent_key: str | None = None) -> Any:
+            if isinstance(node, dict):
+                for key, child in list(node.items()):
+                    node[key] = visit(child, key)
+                return node
+            if isinstance(node, list):
+                for index, child in enumerate(node):
+                    node[index] = visit(child, parent_key)
+                return node
+            if not isinstance(node, str) or parent_key not in media_keys:
+                return node
+            if node.startswith(("http://", "https://", "data:")):
+                return node
+
+            if node.lower().startswith("file://"):
+                parsed = urlsplit(node)
+                decoded_path = unquote(parsed.path)
+                if len(parsed.netloc) == 2 and parsed.netloc[1] == ":":
+                    raw_path = f"{parsed.netloc}{decoded_path}"
+                elif parsed.netloc and parsed.netloc.lower() != "localhost":
+                    raw_path = f"//{parsed.netloc}{decoded_path}"
+                else:
+                    raw_path = decoded_path
+                # Standard Windows file URIs use file:///C:/...; pathlib on
+                # Windows needs the drive path without the URI's leading slash.
+                if len(raw_path) >= 3 and raw_path[0] == "/" and raw_path[2] == ":":
+                    raw_path = raw_path[1:]
+            else:
+                raw_path = node
+            source = Path(raw_path).resolve()
+            if not source.is_file():
+                return node
+            if source not in staged_by_source:
+                digest = hashlib.sha256(str(source).encode("utf-8")).hexdigest()[:12]
+                name = f"{digest}-{source.name}"
+                public_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, public_dir / name)
+                staged_by_source[source] = name
+            return staged_by_source[source]
+
+        visit(value)
+        return len(staged_by_source)
+
     def _render_via_atelier(
         self,
         inputs: dict[str, Any],
@@ -798,6 +1003,11 @@ class VideoCompose(BaseTool):
                 success=False,
                 error=f"Atelier render completed but output file missing: {output_path}",
             )
+
+        if inputs.get("audio_path"):
+            mux_result = self._mux_external_audio(output_path, inputs["audio_path"])
+            if not mux_result.success:
+                return mux_result
 
         # --- Atelier post-render review -------------------------------------
         # The cut-schema paths run _run_final_review (technical/visual/audio
@@ -1022,8 +1232,12 @@ class VideoCompose(BaseTool):
             try:
                 from styles.playbook_loader import load_playbook
                 playbook = load_playbook(playbook_name)
-            except Exception:
-                pass
+            except Exception as exc:
+                logging.getLogger(__name__).warning(
+                    "Could not load style playbook %r for Remotion theme: %s",
+                    playbook_name,
+                    exc,
+                )
 
         if playbook:
             vl = playbook.get("visual_language", {})
@@ -1270,6 +1484,36 @@ class VideoCompose(BaseTool):
         if not edit_decisions:
             return ToolResult(success=False, error="edit_decisions required for render")
 
+        # --- Runtime routing: honor render_runtime locked at proposal ---
+        # Silent swaps are forbidden by governance. Resolve this before any
+        # composition-mode branching so `composition_mode="atelier"` cannot
+        # accidentally force the Remotion atelier path when HyperFrames or
+        # FFmpeg was approved.
+        render_runtime = (edit_decisions.get("render_runtime") or "").strip().lower()
+
+        if not render_runtime:
+            return ToolResult(
+                success=False,
+                error=(
+                    "render_runtime is not set in edit_decisions. Per governance, "
+                    "it MUST be locked at proposal stage (proposal_packet."
+                    "production_plan.render_runtime) and carried forward through "
+                    "edit_decisions.render_runtime. Valid values: 'remotion', "
+                    "'hyperframes', 'ffmpeg'. Re-run the proposal stage with an "
+                    "explicit runtime choice — do NOT default this field."
+                ),
+            )
+
+        if render_runtime not in {"remotion", "hyperframes", "ffmpeg"}:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"Unknown render_runtime {render_runtime!r}. "
+                    f"Valid values: remotion, hyperframes, ffmpeg. "
+                    f"render_runtime must be set at proposal stage."
+                ),
+            )
+
         # --- Atelier (bespoke) mode -------------------------------------
         # Hand-authored, project-local Remotion composition. Deliberately
         # bypasses the cut-schema, the stock scene-type registry, and the
@@ -1278,9 +1522,37 @@ class VideoCompose(BaseTool):
         # under remotion-composer/projects/<slug>/ and points this renderer at
         # it. No reusable creative components; a new visual language per video.
         # Triggered by composition_mode="atelier" (or renderer_family="bespoke").
-        if (edit_decisions.get("composition_mode") == "atelier"
-                or edit_decisions.get("renderer_family") == "bespoke"):
+        remotion_atelier_requested = (
+            edit_decisions.get("composition_mode") == "atelier"
+            or edit_decisions.get("renderer_family") == "bespoke"
+        )
+        if render_runtime == "remotion" and remotion_atelier_requested:
             return self._render_via_atelier(inputs, edit_decisions)
+
+        # HyperFrames is HTML-first and therefore atelier by default for hero
+        # work. When a project-local authored workspace already exists, route
+        # before the stock cut/asset requirements so hyperframes_compose can
+        # validate and render it without overwriting index.html.
+        hyperframes_atelier_requested = (
+            render_runtime == "hyperframes"
+            and (
+                edit_decisions.get("composition_mode") == "atelier"
+                or edit_decisions.get("renderer_family") == "bespoke"
+                or bool(edit_decisions.get("bespoke", {}).get("entry"))
+            )
+        )
+        if hyperframes_atelier_requested:
+            output_path = Path(inputs.get("output_path", "renders/output.mp4"))
+            output_path.parent.mkdir(parents=True, exist_ok=True)
+            profile = inputs.get("profile") or inputs.get("output_profile")
+            return self._render_via_hyperframes(
+                inputs=inputs,
+                edit_decisions=edit_decisions,
+                asset_manifest=asset_manifest or {"version": "1.0", "assets": []},
+                resolved_cuts=list(edit_decisions.get("cuts") or []),
+                output_path=output_path,
+                profile=profile,
+            )
 
         if not asset_manifest:
             return ToolResult(success=False, error="asset_manifest required for render")
@@ -1313,26 +1585,6 @@ class VideoCompose(BaseTool):
         # Also accept profile as "output_profile" (skill convention) or "profile"
         profile = inputs.get("profile") or inputs.get("output_profile")
 
-        # --- Runtime routing: honor render_runtime locked at proposal ---
-        # Silent swaps are forbidden by governance. If the chosen runtime
-        # is unavailable, surface a structured blocker rather than quietly
-        # picking a different engine. Missing render_runtime is itself a
-        # governance violation — edit_decisions.schema.json requires it.
-        render_runtime = (edit_decisions.get("render_runtime") or "").strip().lower()
-
-        if not render_runtime:
-            return ToolResult(
-                success=False,
-                error=(
-                    "render_runtime is not set in edit_decisions. Per governance, "
-                    "it MUST be locked at proposal stage (proposal_packet."
-                    "production_plan.render_runtime) and carried forward through "
-                    "edit_decisions.render_runtime. Valid values: 'remotion', "
-                    "'hyperframes', 'ffmpeg'. Re-run the proposal stage with an "
-                    "explicit runtime choice — do NOT default this field."
-                ),
-            )
-
         if render_runtime == "hyperframes":
             return self._render_via_hyperframes(
                 inputs=inputs,
@@ -1351,16 +1603,6 @@ class VideoCompose(BaseTool):
                 output_path=output_path,
                 profile=profile,
             )
-        if render_runtime != "remotion":
-            return ToolResult(
-                success=False,
-                error=(
-                    f"Unknown render_runtime {render_runtime!r}. "
-                    f"Valid values: remotion, hyperframes, ffmpeg. "
-                    f"render_runtime must be set at proposal stage."
-                ),
-            )
-
         # --- Explicit Remotion path (render_runtime == 'remotion') ---
         if self._needs_remotion(resolved_cuts):
             remotion_inputs: dict[str, Any] = {
@@ -1369,6 +1611,13 @@ class VideoCompose(BaseTool):
             }
             if profile:
                 remotion_inputs["profile"] = profile
+            # Forward the creator-facing render timeout through the high-level
+            # render path (execute(operation="render") -> _render), otherwise it
+            # would only take effect on a direct _remotion_render() call.
+            if inputs.get("remotion_timeout_ms") is not None:
+                remotion_inputs["remotion_timeout_ms"] = inputs["remotion_timeout_ms"]
+            if inputs.get("public_dir") is not None:
+                remotion_inputs["public_dir"] = inputs["public_dir"]
             render_result = self._remotion_render(remotion_inputs)
 
             # Governance: NEVER silently fall back to FFmpeg when Remotion fails.
@@ -1388,6 +1637,11 @@ class VideoCompose(BaseTool):
                         f"Per governance: renderer downgrade requires user approval."
                     ),
                 )
+            if inputs.get("audio_path"):
+                mux_result = self._mux_external_audio(output_path, inputs["audio_path"])
+                if not mux_result.success:
+                    return mux_result
+                render_result.data["has_mixed_audio"] = True
         else:
             # --- FFmpeg fallback: only when Remotion is unavailable ---
             options = inputs.get("options", {})
@@ -1497,11 +1751,21 @@ class VideoCompose(BaseTool):
                 try:
                     from styles.playbook_loader import load_playbook  # type: ignore
                     playbook_data = load_playbook(playbook_name)
-                except Exception:
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "Could not load style playbook %r for HyperFrames bridge: %s",
+                        playbook_name,
+                        exc,
+                    )
                     playbook_data = None
 
+        authored_workspace = (
+            edit_decisions.get("composition_mode") == "atelier"
+            or edit_decisions.get("renderer_family") == "bespoke"
+            or bool(edit_decisions.get("bespoke", {}).get("entry"))
+        )
         hf_inputs: dict[str, Any] = {
-            "operation": "render",
+            "operation": "render_existing" if authored_workspace else "render",
             "workspace_path": workspace_path,
             "output_path": str(output_path),
             "edit_decisions": dict(edit_decisions, cuts=resolved_cuts),
@@ -1519,6 +1783,10 @@ class VideoCompose(BaseTool):
             hf_inputs["strict"] = inputs["strict"]
         if "skip_contrast" in inputs:
             hf_inputs["skip_contrast"] = inputs["skip_contrast"]
+        if "strict_check" in inputs:
+            hf_inputs["strict_check"] = inputs["strict_check"]
+        if "snapshots" in inputs:
+            hf_inputs["snapshots"] = inputs["snapshots"]
 
         render_result = HyperFramesCompose().execute(hf_inputs)
 
@@ -1628,8 +1896,6 @@ class VideoCompose(BaseTool):
         types, and transitions using React-based frame-accurate rendering.
         Accepts edit_decisions (with resolved file paths) or raw composition_data.
         """
-        import shutil
-
         if not shutil.which("npx"):
             return ToolResult(
                 success=False,
@@ -1651,16 +1917,6 @@ class VideoCompose(BaseTool):
         # Deep-copy props so we don't mutate the original
         props = json.loads(json.dumps(composition_data))
 
-        # Convert absolute file paths to file:// URIs for Remotion's
-        # Img and OffthreadVideo components
-        for cut in props.get("cuts", []):
-            source = cut.get("source", "")
-            if source and not source.startswith(("http://", "https://", "file://")):
-                resolved = Path(source).resolve()
-                if resolved.exists():
-                    posix = resolved.as_posix()
-                    cut["source"] = f"file:///{posix}" if not posix.startswith("/") else f"file://{posix}"
-
         # Build a custom themeConfig from the playbook's actual colors.
         # This ensures every video gets a unique visual identity derived
         # from its production decisions — not picked from a preset menu.
@@ -1673,11 +1929,6 @@ class VideoCompose(BaseTool):
             theme_config = self._build_theme_from_playbook(playbook_name, composition_data)
             if theme_config:
                 props["themeConfig"] = theme_config
-
-        # Write props to temp file for Remotion CLI
-        props_path = output_path.parent / ".remotion_props.json"
-        with open(props_path, "w", encoding="utf-8") as f:
-            json.dump(props, f)
 
         # remotion-composer lives at project root
         composer_dir = Path(__file__).resolve().parent.parent.parent / "remotion-composer"
@@ -1692,6 +1943,39 @@ class VideoCompose(BaseTool):
         renderer_family = (composition_data or {}).get("renderer_family", "explainer-data")
         composition_id = self._get_composition_id(renderer_family)
 
+        if composition_id == "CinematicRenderer":
+            if not props.get("scenes") and props.get("cuts"):
+                props["scenes"] = self._cuts_to_cinematic_scenes(props["cuts"])
+            props.pop("cuts", None)
+            if not props.get("scenes"):
+                return ToolResult(
+                    success=False,
+                    error="CinematicRenderer received cuts but none could be adapted into scenes.",
+                )
+
+        requested_public_dir = inputs.get("public_dir")
+        cleanup_public_dir = False
+        public_dir: Path | None = None
+        if requested_public_dir:
+            public_dir = Path(requested_public_dir).resolve()
+            if not public_dir.is_dir():
+                return ToolResult(
+                    success=False,
+                    error=f"Remotion public_dir does not exist or is not a directory: {public_dir}",
+                )
+        else:
+            public_dir = output_path.parent / f".remotion-public-{output_path.stem}"
+            cleanup_public_dir = True
+
+        staged_count = self._stage_remotion_media(props, public_dir)
+        if not staged_count and cleanup_public_dir:
+            public_dir = None
+
+        # Write the fully adapted/staged props, never the original cut payload.
+        props_path = output_path.parent / ".remotion_props.json"
+        with open(props_path, "w", encoding="utf-8") as f:
+            json.dump(props, f)
+
         cmd = [
             "npx", "remotion", "render",
             str(composer_dir / "src" / "index.tsx"),
@@ -1704,6 +1988,8 @@ class VideoCompose(BaseTool):
             # API Remotion recommends for file paths and is cross-platform safe.
             f"--props={props_path}",
         ]
+        if public_dir is not None:
+            cmd.append(f"--public-dir={public_dir}")
 
         # Apply media profile dimensions
         profile_name = inputs.get("profile")
@@ -1715,17 +2001,53 @@ class VideoCompose(BaseTool):
             except (ImportError, ValueError):
                 pass
 
+        # Optional creator-facing render timeout. Remotion's `--timeout` (ms)
+        # governs headless-browser setup and delayRender(); on slow machines or
+        # restricted networks the default 30s browser setup times out with an
+        # opaque failure. Pass it through and give the subprocess enough headroom
+        # so run_command() does not kill Remotion before its own timeout fires.
+        remotion_timeout_ms = inputs.get("remotion_timeout_ms")
+        scene_count = len(props.get("scenes") or props.get("cuts") or [])
+        subprocess_timeout = max(600, scene_count * 15)
+        if remotion_timeout_ms:
+            try:
+                ms = int(remotion_timeout_ms)
+                cmd.append(f"--timeout={ms}")
+                subprocess_timeout = max(subprocess_timeout, ms // 1000 + 60)
+            except (TypeError, ValueError):
+                pass
+
         try:
             # Invoke from inside the composer dir so npx can resolve the
             # local remotion binary via node_modules/.bin. Without this,
             # Windows npx cannot locate the CLI and returns "could not
             # determine executable to run".
-            self.run_command(cmd, timeout=600, cwd=composer_dir)
+            self.run_command(cmd, timeout=subprocess_timeout, cwd=composer_dir)
+        except subprocess.CalledProcessError as e:
+            # run_command uses check=True + capture_output, so the useful
+            # Remotion diagnostics live in stderr/stdout — surface the tail
+            # instead of the bare "returned non-zero exit status 1".
+            detail = (e.stderr or e.stdout or "").strip()
+            tail = "\n".join(detail.splitlines()[-25:]) if detail else "(no output captured)"
+            return ToolResult(
+                success=False,
+                error=f"Remotion render failed (exit {e.returncode}):\n{tail}",
+            )
+        except subprocess.TimeoutExpired as e:
+            return ToolResult(
+                success=False,
+                error=(
+                    f"Remotion render timed out after {e.timeout}s. If the headless "
+                    "browser is slow to start, raise remotion_timeout_ms (ms)."
+                ),
+            )
         except Exception as e:
             return ToolResult(success=False, error=f"Remotion render failed: {e}")
         finally:
             if props_path.exists():
                 props_path.unlink()
+            if cleanup_public_dir and public_dir is not None and public_dir.exists():
+                shutil.rmtree(public_dir, ignore_errors=True)
 
         if not output_path.exists():
             return ToolResult(
@@ -1739,6 +2061,7 @@ class VideoCompose(BaseTool):
                 "operation": "remotion_render",
                 "output": str(output_path),
                 "profile": profile_name,
+                "staged_media_count": staged_count,
             },
             artifacts=[str(output_path)],
         )

@@ -93,3 +93,11 @@ remotion-composer/public/demo-props/talking-head-*
 remotion-composer/public/demo-props/caption-burn-*
 
 venv/
+.venv/
+
+# Backlot local cache (thumbnails)
+.backlot/
+
+# Workspace-local third-party runtimes (for example the portable Blender LTS
+# used by blender_world). These are checksum-verified but never committed.
+.runtime/
