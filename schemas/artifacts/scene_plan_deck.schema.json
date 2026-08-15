@@ -1,0 +1,24 @@
+{
+  "$schema": "@url:`http://json-schema.org/draft-07/schema#`",
+  "title": "Scene Plan Deck",
+  "description": "Workspace Slides compatible deck generated from a scene_plan for human review.",
+  "type": "object",
+  "required": ["themeVersion", "slides"],
+  "properties": {
+    "themeVersion": {"type": "string", "enum": ["workspace.1"]},
+    "project": {"type": "string"},
+    "derived_from": {"type": "string"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "slides": {"type": "array", "items": {"$ref": "#/$defs/slide"}}
+  },
+  "$defs": {
+    "slide": {
+      "type": "object", "required": ["id", "background", "blocks"],
+      "properties": {"id": {"type": "string", "minLength": 1}, "background": {"type": "object"}, "blocks": {"type": "array", "items": {"$ref": "#/$defs/block"}}}
+    },
+    "block": {
+      "type": "object", "required": ["id", "type", "x", "y"],
+      "properties": {"id": {"type": "string", "minLength": 1}, "type": {"type": "string"}, "x": {"type": "number"}, "y": {"type": "number"}, "w": {"type": "number"}, "h": {"type": "number"}, "props": {"type": "object"}}
+    }
+  }
+}
