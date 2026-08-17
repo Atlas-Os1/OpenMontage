@@ -32,10 +32,12 @@ required_skills:
   - pipelines/explainer/proposal-director
   - pipelines/explainer/script-director
   - pipelines/explainer/scene-director
+  - pipelines/explainer/storyboard-director
   - pipelines/explainer/asset-director
   - pipelines/explainer/edit-director
   - pipelines/explainer/compose-director
   - pipelines/explainer/publish-director
+  - pipelines/explainer/publish-deck-director
   - meta/reviewer
   - meta/checkpoint-protocol
   - meta/skill-creator
@@ -157,6 +159,28 @@ stages:
       - Schema-valid scene_plan with required_assets per scene
       - At least 3 different scene types used
 
+  - name: storyboard
+    skill: pipelines/explainer/storyboard-director
+    required_artifacts_in:
+      - scene_plan
+    optional_artifacts_in:
+      - proposal_packet
+    produces:
+      - scene_plan_deck
+    tools_available:
+      - slides_adapter
+      - image_selector
+    checkpoint_required: true
+    human_approval_default: true
+    review_focus:
+      - Every scene has a storyboard slide with timing, narration, and visual summary
+      - Slide order matches the scene_plan
+      - Placeholder images (if any) faithfully represent the scene intent
+      - Deck is valid Workspace Slides JSON and can be opened in the gadget
+    success_criteria:
+      - Schema-valid scene_plan_deck artifact exists
+      - One scene slide per scene_plan scene
+
   - name: assets
     skill: pipelines/explainer/asset-director
     required_artifacts_in:
@@ -267,3 +291,24 @@ stages:
     success_criteria:
       - Schema-valid publish_log
       - Export directory contains video, metadata, and thumbnail concept
+
+  - name: publish_deck
+    skill: pipelines/explainer/publish-deck-director
+    required_artifacts_in:
+      - render_report
+    optional_artifacts_in:
+      - publish_log
+      - edit_decisions
+    produces:
+      - key_moments_deck
+    tools_available:
+      - slides_adapter
+      - frame_sampler
+    checkpoint_required: false
+    human_approval_default: false
+    review_focus:
+      - Key moments cover the full video at meaningful points
+      - Captions match narration and are free of errors
+      - Image URLs reference rendered output frames
+    success_criteria:
+      - Schema-valid key_moments_deck artifact exists

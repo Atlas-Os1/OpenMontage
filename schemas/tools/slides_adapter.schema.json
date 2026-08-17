@@ -1,0 +1,13 @@
+{
+  "$schema": "@url:`http://json-schema.org/draft-07/schema#`",
+  "title": "SlidesAdapter Input Schema",
+  "type": "object",
+  "required": ["action"],
+  "properties": {
+    "action": {"type": "string", "enum": ["scene_plan_to_deck", "key_moments_to_deck", "create_title_slide", "create_content_slide", "save_deck", "load_deck"]},
+    "scene_plan": {"type": "object"}, "key_moments": {"type": "array", "items": {"type": "object"}},
+    "title": {"type": "string"}, "subtitle": {"type": "string"}, "project": {"type": "string"},
+    "placeholders": {"type": "object"}, "render_path": {"type": "string"}, "eyebrow": {"type": "string"},
+    "headline": {"type": "string"}, "body": {"type": "string"}, "path": {"type": "string"}, "deck": {"type": "object"}
+  }
+}
