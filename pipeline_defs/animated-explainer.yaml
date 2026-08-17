@@ -37,6 +37,7 @@ required_skills:
   - pipelines/explainer/edit-director
   - pipelines/explainer/compose-director
   - pipelines/explainer/publish-director
+  - pipelines/explainer/publish-deck-director
   - meta/reviewer
   - meta/checkpoint-protocol
   - meta/skill-creator
@@ -287,3 +288,24 @@ stages:
     success_criteria:
       - Schema-valid publish_log
       - Export directory contains video, metadata, and thumbnail concept
+
+  - name: publish_deck
+    skill: pipelines/explainer/publish-deck-director
+    required_artifacts_in:
+      - render_report
+    optional_artifacts_in:
+      - publish_log
+      - edit_decisions
+    produces:
+      - key_moments_deck
+    tools_available:
+      - slides_adapter
+      - frame_sampler
+    checkpoint_required: false
+    human_approval_default: false
+    review_focus:
+      - Key moments cover the full video at meaningful points
+      - Captions match narration and are free of errors
+      - Image URLs reference rendered output frames
+    success_criteria:
+      - Schema-valid key_moments_deck artifact exists

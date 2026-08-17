@@ -84,3 +84,31 @@ def test_slides_adapter_unknown_action():
 def test_animated_explainer_manifest_has_storyboard_stage():
     text = (Path(__file__).resolve().parents[2] / "pipeline_defs" / "animated-explainer.yaml").read_text(encoding="utf-8")
     assert "name: storyboard" in text and "storyboard-director" in text and "scene_plan_deck" in text
+
+
+def test_make_key_moment_slide():
+    from tools.presentation.slides_adapter import make_key_moment_slide
+    slide = make_key_moment_slide({"timestamp": 5.0, "caption": "The narrator introduces the core concept.", "title": "Core concept", "image_url": "@url:`http://example.com/frame.png`"}, 1)
+    types = [b["type"] for b in slide["blocks"]]
+    assert "sectionLabel" in types and "image" in types
+
+
+def test_key_moments_to_deck():
+    from tools.presentation.slides_adapter import key_moments_to_deck
+    deck = key_moments_to_deck([
+        {"timestamp": 0.0, "caption": "Opening hook", "image_url": "@url:`http://example.com/0.png`"},
+        {"timestamp": 10.0, "caption": "The payoff", "image_url": "@url:`http://example.com/10.png`"},
+    ], title="Key Moments", project="demo", render_path="final.mp4")
+    _valid_deck(deck)
+    assert len(deck["slides"]) == 3 and deck["derived_from_render_report"] == "final.mp4"
+
+
+def test_slides_adapter_key_moments_to_deck():
+    result = SlidesAdapter().execute({"action": "key_moments_to_deck", "key_moments": [{"timestamp": 3.0, "caption": "A key point", "image_url": "a.png"}], "title": "Adapter Key Moments", "project": "demo", "render_path": "out.mp4"})
+    assert result.success
+    _valid_deck(result.data["deck"])
+
+
+def test_animated_explainer_manifest_has_publish_deck_stage():
+    text = (Path(__file__).resolve().parents[2] / "pipeline_defs" / "animated-explainer.yaml").read_text(encoding="utf-8")
+    assert "name: publish_deck" in text and "publish-deck-director" in text and "key_moments_deck" in text
